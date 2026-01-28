@@ -10,12 +10,10 @@ import {
   getDoc,
   onSnapshot,
   updateDoc,
-  arrayUnion,
-  DocumentReference,
-  DocumentSnapshot,
+  deleteDoc,
 } from 'firebase/firestore';
 
-// STUN servers help the browser find its public IP
+// ... (keep iceServers same)
 const iceServers = {
   iceServers: [
     {
@@ -59,16 +57,11 @@ export default function VideoRoom() {
   const createPeerConnection = () => {
     const pc = new RTCPeerConnection(iceServers);
 
-    // 1. Handle Local ICE Candidates
-    // When the browser finds a path (candidate), we need to send it to the other peer via Firestore
     pc.onicecandidate = (event) => {
-      // Logic handled in createRoom/joinRoom specifically to know WHICH collection to add to
-      // We will attach the specific handler later
+      // Logic handled in specific functions
       console.log('New ICE candidate:', event.candidate);
     };
 
-    // 2. Handle Remote Stream
-    // When the other peer sends their video track
     pc.ontrack = (event) => {
       console.log('Received remote track');
       event.streams[0].getTracks().forEach((track) => {
@@ -80,7 +73,6 @@ export default function VideoRoom() {
       });
     };
 
-    // Add local tracks to the connection
     localStream?.getTracks().forEach((track) => {
       pc.addTrack(track, localStream!);
     });
@@ -88,30 +80,55 @@ export default function VideoRoom() {
     return pc;
   };
 
+  const cleanup = () => {
+    if (peerConnection.current) {
+      peerConnection.current.close();
+      peerConnection.current = null;
+    }
+    setRemoteStream(null);
+    if (remoteVideoRef.current) {
+      remoteVideoRef.current.srcObject = null;
+    }
+  };
+
+  const hangUp = async () => {
+    cleanup();
+    setStatus('Hung up');
+    
+    // Delete room if we have an ID
+    if (roomId) {
+      try {
+        await deleteDoc(doc(db, 'rooms', roomId));
+        console.log('Room deleted');
+      } catch (e) {
+        console.error('Error deleting room:', e);
+      }
+      setRoomId('');
+    }
+    
+    // Ideally, we would reload window or reset state completely to start over
+    window.location.reload();
+  };
+
   // --- CREATE ROOM (Caller) ---
   const createRoom = async () => {
     setStatus('Creating Room...');
     try {
-      // 1. Create PC
       const pc = createPeerConnection();
       peerConnection.current = pc;
 
-      // 2. Create Room Reference in Firestore
       const roomRef = doc(collection(db, 'rooms'));
-      
-      // 3. Handle ICE Candidates: Save caller's candidates to 'callerCandidates' subcollection
       const callerCandidatesCollection = collection(roomRef, 'callerCandidates');
+      
       pc.onicecandidate = (event) => {
         if (event.candidate) {
           addDoc(callerCandidatesCollection, event.candidate.toJSON());
         }
       };
 
-      // 4. Create Offer
       const offerDescription = await pc.createOffer();
       await pc.setLocalDescription(offerDescription);
 
-      // 5. Save Offer to Firestore
       const roomWithOffer = {
         offer: {
           type: offerDescription.type,
@@ -122,7 +139,6 @@ export default function VideoRoom() {
       setRoomId(roomRef.id);
       setStatus('Waiting for someone to join...');
 
-      // 6. Listen for Remote Answer
       onSnapshot(roomRef, (snapshot) => {
         const data = snapshot.data();
         if (!pc.currentRemoteDescription && data?.answer) {
@@ -132,7 +148,6 @@ export default function VideoRoom() {
         }
       });
 
-      // 7. Listen for Callee ICE Candidates
       const calleeCandidatesCollection = collection(roomRef, 'calleeCandidates');
       onSnapshot(calleeCandidatesCollection, (snapshot) => {
         snapshot.docChanges().forEach(async (change) => {
@@ -153,11 +168,9 @@ export default function VideoRoom() {
     if (!joinId) return;
     setStatus('Joining Room...');
     try {
-      // 1. Create PC
       const pc = createPeerConnection();
       peerConnection.current = pc;
 
-      // 2. Get Room Ref
       const roomRef = doc(db, 'rooms', joinId);
       const roomSnapshot = await getDoc(roomRef);
 
@@ -166,7 +179,6 @@ export default function VideoRoom() {
         return;
       }
 
-      // 3. Handle ICE Candidates: Save callee's candidates to 'calleeCandidates' subcollection
       const calleeCandidatesCollection = collection(roomRef, 'calleeCandidates');
       pc.onicecandidate = (event) => {
         if (event.candidate) {
@@ -174,16 +186,13 @@ export default function VideoRoom() {
         }
       };
 
-      // 4. Set Remote Description (Offer from Caller)
       const data = roomSnapshot.data();
       const offer = data?.offer;
       await pc.setRemoteDescription(new RTCSessionDescription(offer));
 
-      // 5. Create Answer
       const answerDescription = await pc.createAnswer();
       await pc.setLocalDescription(answerDescription);
 
-      // 6. Save Answer to Firestore
       const roomWithAnswer = {
         answer: {
           type: answerDescription.type,
@@ -192,7 +201,6 @@ export default function VideoRoom() {
       };
       await updateDoc(roomRef, roomWithAnswer);
 
-      // 7. Listen for Caller ICE Candidates
       const callerCandidatesCollection = collection(roomRef, 'callerCandidates');
       onSnapshot(callerCandidatesCollection, (snapshot) => {
         snapshot.docChanges().forEach(async (change) => {
@@ -246,6 +254,15 @@ export default function VideoRoom() {
             Join
           </button>
         </div>
+
+        {roomId && (
+          <button 
+            onClick={hangUp}
+            className="bg-red-600 hover:bg-red-700 px-6 py-2 rounded-lg font-semibold"
+          >
+            Hang Up
+          </button>
+        )}
       </div>
 
       <p className="mb-8 text-xl text-yellow-400">Status: {status}</p>
