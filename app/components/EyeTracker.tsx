@@ -10,6 +10,16 @@ export default function EyeTracker() {
   const requestRef = useRef<number>(0);
   const [faceLandmarker, setFaceLandmarker] = useState<FaceLandmarker | null>(null);
   const [webcamRunning, setWebcamRunning] = useState(false);
+  
+  // Audio Analysis Refs
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const dataArrayRef = useRef<Uint8Array | null>(null);
+  const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  
+  // Laser State
+  const laserEndTimeRef = useRef<number>(0);
+  const lastVolumeRef = useRef<number>(0);
 
   // Initialize MediaPipe Face Landmarker
   useEffect(() => {
@@ -54,12 +64,44 @@ export default function EyeTracker() {
                 canvas.height = video.videoHeight;
             }
 
+            // --- AUDIO DETECTION LOGIC ---
+            if (analyserRef.current && dataArrayRef.current) {
+                // Cast to any to avoid ArrayBuffer/SharedArrayBuffer mismatch in strict mode
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                analyserRef.current.getByteFrequencyData(dataArrayRef.current as any);
+                
+                // Calculate average volume
+                let sum = 0;
+                const data = dataArrayRef.current;
+                for (let i = 0; i < data.length; i++) {
+                    sum += data[i];
+                }
+                const averageVolume = sum / data.length;
+                
+                // Simple transient detection: sudden increase in volume
+                // "PIU" is usually a sharp attack.
+                const threshold = 30; // Min volume to trigger
+                const sensitivity = 1.5; // How much louder than last frame
+                
+                if (averageVolume > threshold && averageVolume > lastVolumeRef.current * sensitivity) {
+                    // Trigger Laser!
+                    // 500ms duration
+                    laserEndTimeRef.current = performance.now() + 500;
+                }
+                
+                lastVolumeRef.current = averageVolume;
+            }
+            // -----------------------------
+
             if (ctx) {
                 const startTimeMs = performance.now();
                 const results = faceLandmarker.detectForVideo(video, startTimeMs);
 
                 ctx.clearRect(0, 0, canvas.width, canvas.height);
                 
+                // Check if laser is active
+                const isLaserActive = performance.now() < laserEndTimeRef.current;
+
                 // Draw results
                 if (results.faceLandmarks) {
                     for (const landmarks of results.faceLandmarks) {
@@ -114,8 +156,8 @@ export default function EyeTracker() {
                             rightBox.h * canvas.height
                         );
 
-                        // Draw Gaze Arrows (Vector from Eye Center to Iris Center)
-                        const drawGazeArrow = (irisIdx: number, eyeBox: {x: number, y: number, w: number, h: number}) => {
+                        // Draw Gaze Arrows or Lasers
+                        const drawDirection = (irisIdx: number, eyeBox: {x: number, y: number, w: number, h: number}) => {
                             const iris = landmarks[irisIdx];
                             const irisPx = { x: iris.x * canvas.width, y: iris.y * canvas.height };
                             
@@ -127,30 +169,59 @@ export default function EyeTracker() {
                             const dx = irisPx.x - eyeCenterPx.x;
                             const dy = irisPx.y - eyeCenterPx.y;
                             
-                            const scale = 10; 
-                            const endX = irisPx.x + dx * scale;
-                            const endY = irisPx.y + dy * scale;
-                            
-                            ctx.beginPath();
-                            ctx.moveTo(irisPx.x, irisPx.y);
-                            ctx.lineTo(endX, endY);
-                            ctx.strokeStyle = "red";
-                            ctx.lineWidth = 3;
-                            ctx.stroke();
-                            
-                            // Arrow head
-                            const angle = Math.atan2(endY - irisPx.y, endX - irisPx.x);
-                            const headLen = 10;
-                            ctx.beginPath();
-                            ctx.moveTo(endX, endY);
-                            ctx.lineTo(endX - headLen * Math.cos(angle - Math.PI / 6), endY - headLen * Math.sin(angle - Math.PI / 6));
-                            ctx.moveTo(endX, endY);
-                            ctx.lineTo(endX - headLen * Math.cos(angle + Math.PI / 6), endY - headLen * Math.sin(angle + Math.PI / 6));
-                            ctx.stroke();
+                            if (isLaserActive) {
+                                // LASERS!!! 
+                                // Shoot to edge of screen
+                                const scale = 1000; // Big number to go off screen
+                                const endX = irisPx.x + dx * scale;
+                                const endY = irisPx.y + dy * scale;
+
+                                ctx.save();
+                                ctx.shadowBlur = 20;
+                                ctx.shadowColor = "red";
+                                ctx.beginPath();
+                                ctx.moveTo(irisPx.x, irisPx.y);
+                                ctx.lineTo(endX, endY);
+                                ctx.strokeStyle = "rgba(255, 0, 0, 0.8)"; // Red transparent
+                                ctx.lineWidth = 15; // Thick core
+                                ctx.stroke();
+                                
+                                // White core for "hot" look
+                                ctx.beginPath();
+                                ctx.moveTo(irisPx.x, irisPx.y);
+                                ctx.lineTo(endX, endY);
+                                ctx.strokeStyle = "white";
+                                ctx.lineWidth = 5;
+                                ctx.stroke();
+                                ctx.restore();
+
+                            } else {
+                                // Normal Arrows
+                                const scale = 10; 
+                                const endX = irisPx.x + dx * scale;
+                                const endY = irisPx.y + dy * scale;
+                                
+                                ctx.beginPath();
+                                ctx.moveTo(irisPx.x, irisPx.y);
+                                ctx.lineTo(endX, endY);
+                                ctx.strokeStyle = "red";
+                                ctx.lineWidth = 3;
+                                ctx.stroke();
+                                
+                                // Arrow head
+                                const angle = Math.atan2(endY - irisPx.y, endX - irisPx.x);
+                                const headLen = 10;
+                                ctx.beginPath();
+                                ctx.moveTo(endX, endY);
+                                ctx.lineTo(endX - headLen * Math.cos(angle - Math.PI / 6), endY - headLen * Math.sin(angle - Math.PI / 6));
+                                ctx.moveTo(endX, endY);
+                                ctx.lineTo(endX - headLen * Math.cos(angle + Math.PI / 6), endY - headLen * Math.sin(angle + Math.PI / 6));
+                                ctx.stroke();
+                            }
                         }
                         
-                        drawGazeArrow(468, leftBox);
-                        drawGazeArrow(473, rightBox);
+                        drawDirection(468, leftBox);
+                        drawDirection(473, rightBox);
                     }
                 }
 
@@ -174,17 +245,39 @@ export default function EyeTracker() {
 
     if (webcamRunning) {
       setWebcamRunning(false);
+      // Stop audio
+      if (audioContextRef.current) {
+        audioContextRef.current.close();
+        audioContextRef.current = null;
+      }
       return;
     }
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      // Setup Audio Context
+      const AudioContextClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      const audioCtx = new AudioContextClass();
+      audioContextRef.current = audioCtx;
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 256;
+      analyserRef.current = analyser;
+      dataArrayRef.current = new Uint8Array(analyser.frequencyBinCount);
+
+      // Request both video and audio
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      
+      // Connect audio source
+      const source = audioCtx.createMediaStreamSource(stream);
+      source.connect(analyser);
+      sourceRef.current = source;
+
+
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         setWebcamRunning(true);
       }
     } catch (err) {
-      console.error("Error accessing webcam:", err);
+      console.error("Error accessing media devices:", err);
     }
   };
 
@@ -194,6 +287,10 @@ export default function EyeTracker() {
       
       {!faceLandmarker && <p>Loading MediaPipe model...</p>}
       
+      {faceLandmarker && webcamRunning && (
+        <p className="animate-pulse text-lg font-bold text-red-500">Say PIU-PIU 🔫</p>
+      )}
+
       <div className="relative overflow-hidden rounded-xl border border-gray-700 bg-black shadow-2xl">
         <video 
             ref={videoRef} 
