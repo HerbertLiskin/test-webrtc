@@ -7,7 +7,6 @@ const config = {
   semi: false,
   singleQuote: true,
   plugins: [tailwind],
-  tailwindConfig: "./tailwind.config.js",
 };
 
 export default config;
